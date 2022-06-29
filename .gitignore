@@ -10,3 +10,6 @@ Misc/psfj_2.5_build_245_macos/PSFj.app/Contents/MacOS/psfj
 *.plist
 Misc/psfj_2.5_build_245_macos/PSFj.app/Contents/MacOS/empty
 *.tsv
+*.lock
+*.dirlock
+*.pyc
