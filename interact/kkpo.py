@@ -1,3 +1,4 @@
+import enum
 import os
 import sys
 import napari
@@ -136,11 +137,17 @@ class Kkpo:
         ''' 
         Dask/Napari interactive workflow
         '''
-            
-        ims = dask_read(self.file_path /  ('*'+region+'*.tif')) #S000_t000011_V000_R0003_X000_Y000_C02_I0_D0_P00190
+        
+        channels = [dask_read(self.file_path /  ('*'+region+'*'+channel+'*.tif')) for channel in self.channel_names]
+        frames_detected = []
+        for channel in channels:
+            frames_detected.append(channel.shape[0])
+        for ind, channel in enumerate(channels):
+            channels[ind] = channel[:min(frames_detected)]
+        stack = da.stack(channels)
 
         with napari.gui_qt():
             viewer = napari.Viewer(title="Interactive Kkpo Viewer")
-            viewer.add_image(ims, name=f'Region {region}')
+            viewer.add_image(stack, name=f'Region {region}', contrast_limits=[0, 20000]) # T, Z, X, Y)
 
         
