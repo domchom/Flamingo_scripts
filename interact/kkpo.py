@@ -10,14 +10,15 @@ from datetime import datetime
 from tifffile import imread as tiff_read
 from tifffile import imwrite as tiff_write
 from dask_image.imread import imread as dask_read
-#from dask.array.image import imread as dask_read 
 import dask.array as da
 from dask import distributed
+import time
+from yaspin import yaspin
 
 class Kkpo:
 
-    def __init__(self, file_path=None, mag = 10):
-        if file_path == None:
+    def __init__(self, file_path=None):
+        if not file_path:
             print('*****'*9)
             print("I can't make a Kakapo without a file path!")
             print('*****'*9)
@@ -26,43 +27,35 @@ class Kkpo:
         self.files = [file for file in os.listdir(self.file_path) if all([file.endswith('.tif')]) and not any([file.startswith('.'),
                                                                                                               'MP' in file,
                                                                                                               'max' in file])]
+        self.region_names = np.unique([file.split('_')[3] for file in self.files])
+        self.metadata = [line.rstrip() for line in open(self.file_path / 'FlamingoMetaData.txt', "r")]
+        self.objmag = int([line for line in self.metadata if 'Name = ' in line][0][-3:-1])
 
-        self.sample_names =    np.unique([file.split('_')[0] for file in self.files])
-        self.timepoint_names = np.unique([file.split('_')[1] for file in self.files])
-        self.view_names =      np.unique([file.split('_')[2] for file in self.files])
-        self.region_names =    np.unique([file.split('_')[3] for file in self.files])
-        self.tileX_names =     np.unique([file.split('_')[4] for file in self.files])
-        self.tileY_names =     np.unique([file.split('_')[5] for file in self.files])
-        self.channel_names =   np.unique([file.split('_')[6] for file in self.files])
-        self.illum_names =     np.unique([file.split('_')[7] for file in self.files])
-        self.camera_names =    np.unique([file.split('_')[8] for file in self.files])
-        self.planes =          np.unique([file.split('_')[9] for file in self.files])
+    def get_region_info(self, region_name: str):
         '''
-         - get the objective mag from the metadata file
-         - get defer to different regions to get the slices thickness since this could change depending on the region
+        Identifies the number of timepoints, channels, slices, and illumination sources for a given
+        region. Also pulls timestamps from the first and last timepoint to calculate the interval.
+        Parameters: region_name (str) - the name of the region to get the interval for
+        Returns: 
+         - interval (float) - the interval between timepoints in seconds
+         - num_timepoints (int) - the number of timepoints in the region
+         - num_channels (int) - the number of channels in the region
+         - num_slices (int) - the number of slices in the region
+         - num_illum (int) - the number of illumination sources in the region
         '''
-        self.num_samples =      len(self.sample_names)
-        self.num_timepoints =   len(self.timepoint_names)
-        self.num_views =        len(self.view_names)
-        self.num_regions =      len(self.region_names)
-        self.num_tilesX =       len(self.tileX_names)
-        self.num_tilesY =       len(self.tileY_names)
-        self.num_channels =     len(self.channel_names)
-        self.num_illum =        len(self.illum_names)
-        self.num_cameras =      len(self.camera_names)
+        # get the image parameters for the region
+        region_files = [file for file in self.files if region_name in file]
+        timepoint_names = np.unique([file.split('_')[1] for file in region_files])
+        channel_names =   np.unique([file.split('_')[6] for file in self.files])
+        illum_names =     np.unique([file.split('_')[7] for file in self.files])
+        plane_names =     np.unique([file.split('_')[9] for file in self.files])
+        num_timepoints =  len(timepoint_names)
 
+        # pick out the first and lasat settings files
+        setting_files = [file for file in os.listdir(self.file_path) if "Settings.txt" in file and region_name in file and not file.startswith('.')]
+        first_timepoint_name = [file for file in setting_files if all(match in file for match in [timepoint_names[0], channel_names[0], illum_names[0]])]
+        last_timepoint_name = [file for file in setting_files if all(match in file for match in [timepoint_names[-1], channel_names[0], illum_names[0]])]
 
-    def get_interval(self):
-        '''
-        Identifies first and last settings file in the kkpo directory. Pulls timestamps from these files
-        to determine the exact startina and end time. Calculates the total number of seconds elapsed
-        and the frame interval from the number of time points.
-        Returns: frame interval in seconds/frame.
-        '''
-        setting_files = [file for file in os.listdir(self.file_path) if "Settings.txt" in file and not file.startswith('.')]
-        first_timepoint_name = [file for file in setting_files if all(match in file for match in [self.timepoint_names[0], self.region_names[0], self.channel_names[0], self.illum_names[0]])]
-        last_timepoint_name = [file for file in setting_files if all(match in file for match in [self.timepoint_names[-1], self.region_names[0], self.channel_names[0], self.illum_names[0]])]
-        
         # quality control
         if len(first_timepoint_name) != 1 or len(last_timepoint_name) != 1:
             print('*****'*9)
@@ -91,62 +84,12 @@ class Kkpo:
 
         # read the settings file, get the start and end times
         first_timepoint_file = np.loadtxt(self.file_path / first_timepoint_name[0], dtype='str', delimiter = '/n')
-        self.start_datetime = get_datetime(first_timepoint_file)
+        start_datetime = get_datetime(first_timepoint_file)
         last_timepoint_file = np.loadtxt(self.file_path / last_timepoint_name[0], dtype='str', delimiter = '/n')
-        self.end_datetime = get_datetime(last_timepoint_file)
-        self.total_seconds = (self.end_datetime - self.start_datetime).total_seconds()
-        self.interval = self.total_seconds / (self.num_timepoints - 1)
-        return self.interval
-
-    def save_max_old(self, save_max = False, save_vol = False, downsample = 4):
-        '''
-        Loads each timepoint, channel, stage position, etc (still working out the deets), calculates a max projection,
-        and saves the projection to file.
-        Accepts: 
-         - save_max (boo) - whether or not to save the max projection
-         - save_vol (bool) - whether or not to also save the full volume to file.
-         - step (default = 4) - whether or not to downsample the volume.
-        Returns:
-         not sure yet.
-        '''
-        # create a folder to save the max projections
-        self.max_proj_path = self.file_path / 'max_projections'
-        if not os.path.exists(self.max_proj_path):
-            os.mkdir(self.max_proj_path)
-        # create a folder to save the full volume
-        if save_vol:
-            self.vol_path = self.file_path / 'volumes'
-            if not os.path.exists(self.vol_path):
-                os.mkdir(self.vol_path)
-        
-        its = self.num_samples*self.num_timepoints*self.num_views*self.num_regions*self.num_tilesX*self.num_tilesY*self.num_channels*self.num_illum*self.num_cameras
-        with tqdm(total = its, miniters=its/100) as pbar:
-            pbar.set_description('Calculating max projections')
-            for samp in range(self.num_samples):
-                for time in range(self.num_timepoints-1): # -1 because some series are missing the last timepoint
-                    for view in range(self.num_views):
-                        for reg in range(self.num_regions):
-                            for tileX in range(self.num_tilesX):
-                                for tileY in range(self.num_tilesY):
-                                    for chan in range(self.num_channels):
-                                        for illum in range(self.num_illum):
-                                            for cam in range(self.num_cameras):
-                                                file_name = [file for file in self.files if all([match in file for match in [ self.sample_names[samp], 
-                                                                                                                              self.timepoint_names[time], 
-                                                                                                                              self.view_names[view], 
-                                                                                                                              self.region_names[reg], 
-                                                                                                                              self.tileX_names[tileX], 
-                                                                                                                              self.tileY_names[tileY], 
-                                                                                                                              self.channel_names[chan], 
-                                                                                                                              self.illum_names[illum], 
-                                                                                                                              self.camera_names[cam]]])][0]
-                                                img = tiff_read(self.file_path / file_name)
-                                                max_projection = np.max(img, axis=0)
-                                                #tiff_write(self.max_proj_path /  f'{self.sample_names[samp]}_{self.timepoint_names[time]}_{self.view_names[view]}_{self.region_names[reg]}_{self.tileX_names[tileX]}_{self.tileY_names[tileY]}_{self.channel_names[chan]}_{self.illum_names[illum]}_{self.camera_names[cam]}_max_projection.tif', max_projection)
-                                                if save_vol:
-                                                    da.to_zarr(da.from_array(img[:,::step,::step]), self.vol_path / 'volume.zarr')
-                        
-                                                pbar.update(1)
+        end_datetime = get_datetime(last_timepoint_file)
+        total_seconds = (end_datetime - start_datetime).total_seconds()
+        interval = total_seconds / (num_timepoints - 1)
+        return interval, timepoint_names, channel_names, illum_names, plane_names
     
     '''
     A better way to do this may be to iterate through the regions and for each region
@@ -154,43 +97,52 @@ class Kkpo:
     about different regions using different numbers of channels and slices.
     '''
     
-    def save_regions(self, region, step = 4, overwrite = False):
+    def save_regions(self, save_vol = False, step = 8, overwrite = False):
         ''' 
         '''
-        print('saving regions')
 
-        with tqdm(total = self.num_channels) as pbar:
-            pbar.set_description(f'Saving zarr')
+        for region_num, region_name in enumerate(self.region_names):
+            print(f'Saving region {region_num + 1}/{len(self.region_names)}')
+            print(f'Collecting information about region {region_name}')
 
-            max_proj_path = self.file_path / 'max_projections'
-            Path.mkdir(max_proj_path, parents=True, exist_ok=True)
-                
-            for ch_num, ch_name in enumerate(self.channel_names):
-                print(f'starting channel {ch_num+1}...')
-                chan_path = self.file_path / f'region_{region}_{ch_num+1}_volume.zarr'
-                if os.path.exists(chan_path) and not overwrite:
-                    print(f'{chan_path} already exists. Pass overwrite=True to overwrite.')
-                    continue
+            interval, timepoint_names, channel_names, illum_names, plane_names = self.get_region_info(region_name)
 
-                elif os.path.exists(chan_path) and overwrite:
-                    print(f'{chan_path} already exists. Overwriting file!')
-                    channel_array = dask_read(self.file_path /  ('*'+region+'*'+ch_name+'*.tif'))
-                    da.to_zarr(channel_array[:,:,::step,::step], chan_path, overwrite=True)
-                    print('writing max projections...')
-                    for tp in range(self.num_timepoints):
-                        tiff_write(max_proj_path / f'region_{region}_{ch_num+1}_T{tp}_volume.tiff', np.max(channel_array[:,tp,:,:], axis=0))
+            # create a folder to save the max projections and volume arrays for this region
+            region_save_path = self.file_path / f'{region_name}_processed'
 
-                else:
-                    channel_array = dask_read(self.file_path /  ('*'+region+'*'+ch_name+'*.tif'))
-                    da.to_zarr(channel_array[:,:,::step,::step], chan_path)
-                    print('writing max projections...')
-                    for tp in range(self.num_timepoints):
-                        tiff_write(max_proj_path / f'region_{region}_{ch_num+1}_T{tp}_volume.tiff', np.max(channel_array[:,tp,:,:], axis=0))
-                
-                pbar.update(1)
-        print('done saving regions')
-        self.downsampled = step
-        return self.downsampled
+            if os.path.exists(region_save_path) and not overwrite:
+                print(f'{region_save_path} already exists. Pass overwrite=True to overwrite.')
+                continue
+            
+            else:
+                if os.path.exists(region_save_path) and overwrite:
+                    print(f'{region_save_path} already exists. Overwriting file!')
+                    
+                Path.mkdir(region_save_path, parents=True, exist_ok=True)
+    
+                for ch_num, ch_name in enumerate(channel_names):
+                    print(f'Saving channel {ch_num+1}/{len(channel_names)}')
+                    channel_array = dask_read(self.file_path /  (f'*{region_name}*{ch_name}*.tif'))
+
+                    # save the downsampled channel volume, if requested
+                    if save_vol:
+                        with yaspin() as sp:
+                            sp.text = f'Converting full volume for {ch_name} to zarr. This takes 1-2 seconds per time point, please be patient...'
+                            chan_path = self.file_path / f'{region_name}_{ch_name}_volume.zarr'
+                            start = time.time()
+                            da.to_zarr(channel_array[:,:,::step,::step], chan_path, overwrite=True)
+                            end = time.time()
+                            print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
+
+                    # save the max projections for this channel (getting ~16-20s/it which is about as fast as I can do it using fiji)
+                    with tqdm(total=len(timepoint_names)) as max_pbar:
+                        max_pbar.set_description('Saving max projections')
+                        for tp, tp_name in enumerate(timepoint_names):
+                            tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.max(channel_array[:,tp,:,:], axis=0))
+                            max_pbar.update(1)
+
+        print(f'done saving regions')
+
 
     def view_volumes(self, region):
         ''' 
@@ -206,5 +158,3 @@ class Kkpo:
             viewer = napari.Viewer(title="Interactive Kkpo Viewer")
             for chan_num, channel in enumerate(channels):
                 viewer.add_image(channel, name=f'Region {region}, Ch {chan_num+1}', contrast_limits=[0, 20000], blending='additive') # T, Z, X, Y)
-
-        
