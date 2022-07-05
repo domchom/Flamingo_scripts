@@ -1,5 +1,3 @@
-from ast import Continue
-import enum
 import os
 import sys
 import napari
@@ -91,14 +89,13 @@ class Kkpo:
         interval = total_seconds / (num_timepoints - 1)
         return interval, timepoint_names, channel_names, illum_names, plane_names
     
-    '''
-    A better way to do this may be to iterate through the regions and for each region
-    calculate the number of channels, slices, and timepoints. Then I don't have to worry
-    about different regions using different numbers of channels and slices.
-    '''
-    
     def save_regions(self, save_vol = False, step = 8, overwrite = False):
         ''' 
+        Saves the regions as individual files.
+        Parameters: save_vol (bool) - whether or not to save the volume as a single file
+                    step (int) - the step size to use when saving the volume (step=8 will be <10% of original file size)
+                    overwrite (bool) - whether or not to overwrite existing files
+        Returns: None
         '''
 
         for region_num, region_name in enumerate(self.region_names):
@@ -122,23 +119,36 @@ class Kkpo:
     
                 for ch_num, ch_name in enumerate(channel_names):
                     print(f'Saving channel {ch_num+1}/{len(channel_names)}')
-                    channel_array = dask_read(self.file_path /  (f'*{region_name}*{ch_name}*.tif'))
+                    if len(illum_names) > 1:
+                        channel_array_left = dask_read(self.file_path / f'*{region_name}*{ch_name}_I0*.tif')
+                        print(f'channel aray left shape: {channel_array_left.shape}')
+                        channel_array_right = dask_read(self.file_path / f'*{region_name}*{ch_name}_I1*.tif')
+                        print(f'channel aray right shape: {channel_array_right.shape}')
+                    else:
+                        channel_array = dask_read(self.file_path /  f'*{region_name}*{ch_name}*.tif')
 
                     # save the downsampled channel volume, if requested
                     if save_vol:
-                        with yaspin() as sp:
-                            sp.text = f'Converting full volume for {ch_name} to zarr. This takes 1-2 seconds per time point, please be patient...'
-                            chan_path = self.file_path / f'{region_name}_{ch_name}_volume.zarr'
-                            start = time.time()
-                            da.to_zarr(channel_array[:,:,::step,::step], chan_path, overwrite=True)
-                            end = time.time()
-                            print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
+                        if len(illum_names) > 1:
+                            print('still working on fusing two dask arrays, check back later.')
+                            continue
+                        else:
+                            with yaspin() as sp:
+                                sp.text = f'Converting full volume for {ch_name} to zarr, please be patient...'
+                                chan_path = region_save_path / f'{region_name}_{ch_name}_volume.zarr'
+                                start = time.time()
+                                da.to_zarr(channel_array[:,:,::step,::step], chan_path, overwrite=True)
+                                end = time.time()
+                                print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
 
                     # save the max projections for this channel (getting ~16-20s/it which is about as fast as I can do it using fiji)
                     with tqdm(total=len(timepoint_names)) as max_pbar:
                         max_pbar.set_description('Saving max projections')
                         for tp, tp_name in enumerate(timepoint_names):
-                            tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.max(channel_array[:,tp,:,:], axis=0))
+                            if len(illum_names) > 1:
+                                tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.maximum(np.max(channel_array_left[tp,:,:,:], axis=0), np.max(channel_array_right[tp,:,:,:], axis=0)))
+                            else:
+                                tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.max(channel_array[tp,:,:,:], axis=0))
                             max_pbar.update(1)
 
         print(f'done saving regions')
@@ -148,11 +158,14 @@ class Kkpo:
         ''' 
         Dask/Napari interactive workflow
         '''
-        if not self.downsampled:
-            print('Please run save_regions() before trying to interact with saved volumes.')
+        # check for volume data
+        region_save_path = self.file_path / f'{region}_processed'
+        interval, timepoint_names, channel_names, illum_names, plane_names = self.get_region_info(region)
+        volume_names = [f'{region}_{ch}_volume.zarr' for ch in channel_names]
+        if not all(os.path.exists(region_save_path / volume_name) for volume_name in volume_names):
+            print(f'One or more channels for region {region} have not been processed. Please run save_regions(save_vol = True) before trying to interact with saved volumes.')
 
-        channels = [dask_read(self.file_path /  ('*'+region+'*'+channel+'*.tif')) for channel in self.channel_names]
-        channels = [da.from_zarr(self.file_path / f'region_{region}_{chan_num+1}_volume.zarr') for chan_num in range(self.num_channels)]
+        channels = [da.from_zarr(region_save_path / f'{region}_{ch}_volume.zarr') for ch in channel_names]
 
         with napari.gui_qt():
             viewer = napari.Viewer(title="Interactive Kkpo Viewer")
