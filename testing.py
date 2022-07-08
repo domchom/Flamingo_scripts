@@ -4,6 +4,7 @@ from dask.distributed import Client
 
 if __name__ == '__main__':
     client = Client()
+    print(client.dashboard_link)
     kkpo = Kkpo('/Volumes/bigData/kkpo_test/1_region_2i')
 
     start = time.time()
