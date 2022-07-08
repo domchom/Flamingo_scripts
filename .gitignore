@@ -13,3 +13,4 @@ Misc/psfj_2.5_build_245_macos/PSFj.app/Contents/MacOS/empty
 *.lock
 *.dirlock
 *.pyc
+*.png
