@@ -120,60 +120,62 @@ class Kkpo:
             elif os.path.exists(region_save_path) and overwrite:
                 print(f'{region_save_path} already exists. Overwriting file!')
     
+            else:
+                print('Creating directories...')
                 Path.mkdir(region_save_path, parents=True, exist_ok=True)
     
-                for ch_num, ch_name in enumerate(channel_names):
-                    print(f'Saving channel {ch_num+1}/{len(channel_names)}')
+            for ch_num, ch_name in enumerate(channel_names):
+                print(f'Saving channel {ch_num+1}/{len(channel_names)}')
+                if len(illum_names) > 1:
+                    print('Two-sided illumination detected')
+                    channel_array_left = dask_read(self.file_path / f'*{region_name}*{ch_name}_I0*.tif')
+                    channel_array_right = dask_read(self.file_path / f'*{region_name}*{ch_name}_I1*.tif')
+
+                    # if one side has fewer time points, trim the other side
+                    numtp1 = channel_array_left.shape[0]
+                    numtp2 = channel_array_right.shape[0]
+                    if numtp1 < numtp2:
+                        channel_array_right = channel_array_right[:numtp1]
+                    elif numtp2 < numtp1:
+                        channel_array_left = channel_array_left[:numtp2]
+                    assert channel_array_left.shape == channel_array_right.shape, 'something is wrong... I0 and I1 arrays are not the same shape'
+
+
+                else:
+                    channel_array = dask_read(self.file_path /  f'*{region_name}*{ch_name}*.tif')
+
+                # save the downsampled channel volume, if requested
+                if save_vol:
+
+                    chan_path = region_save_path / f'{region_name}_{ch_name}_volume.zarr'
+
                     if len(illum_names) > 1:
-                        print('Two-sided illumination detected')
-                        channel_array_left = dask_read(self.file_path / f'*{region_name}*{ch_name}_I0*.tif')
-                        channel_array_right = dask_read(self.file_path / f'*{region_name}*{ch_name}_I1*.tif')
-
-                        # if one side has fewer time points, trim the other side
-                        numtp1 = channel_array_left.shape[0]
-                        numtp2 = channel_array_right.shape[0]
-                        if numtp1 < numtp2:
-                            channel_array_right = channel_array_right[:numtp1]
-                        elif numtp2 < numtp1:
-                            channel_array_left = channel_array_left[:numtp2]
-                        assert channel_array_left.shape == channel_array_right.shape, 'something is wrong... I0 and I1 arrays are not the same shape'
-
+                        with yaspin() as sp:
+                            sp.text = f'Fusing two-sided illumination and converting full volume for {ch_name} to zarr, please be patient...'
+                            start = time.time()
+                            fused = da.maximum(channel_array_left, channel_array_right)
+                            da.to_zarr(fused[:,:,::step,::step], chan_path, overwrite=True)
+                            end = time.time()
+                            print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
 
                     else:
-                        channel_array = dask_read(self.file_path /  f'*{region_name}*{ch_name}*.tif')
+                        with yaspin() as sp:
+                            sp.text = f'Converting full volume for {ch_name} to zarr, please be patient...'
+                            start = time.time()
+                            da.to_zarr(channel_array[:,:,::step,::step], chan_path, overwrite=True)
+                            end = time.time()
+                            print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
 
-                    # save the downsampled channel volume, if requested
-                    if save_vol:
-
-                        chan_path = region_save_path / f'{region_name}_{ch_name}_volume.zarr'
-
-                        if len(illum_names) > 1:
-                            with yaspin() as sp:
-                                sp.text = f'Fusing two-sided illumination and converting full volume for {ch_name} to zarr, please be patient...'
-                                start = time.time()
-                                fused = da.maximum(channel_array_left, channel_array_right)
-                                da.to_zarr(fused[:,:,::step,::step], chan_path, overwrite=True)
-                                end = time.time()
-                                print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
-
-                        else:
-                            with yaspin() as sp:
-                                sp.text = f'Converting full volume for {ch_name} to zarr, please be patient...'
-                                start = time.time()
-                                da.to_zarr(channel_array[:,:,::step,::step], chan_path, overwrite=True)
-                                end = time.time()
-                                print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
-
-                    # save the max projections for this channel (getting ~16-20s/it which is about as fast as I can do it using fiji)
-                    if save_max:
-                        with tqdm(total=len(timepoint_names)) as max_pbar:
-                            max_pbar.set_description('Saving max projections')
-                            for tp, tp_name in enumerate(timepoint_names):
-                                if len(illum_names) > 1:
-                                    tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.maximum(np.max(channel_array_left[tp,:,:,:], axis=0), np.max(channel_array_right[tp,:,:,:], axis=0)))
-                                else:
-                                    tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.max(channel_array[tp,:,:,:], axis=0))
-                                max_pbar.update(1)
+                # save the max projections for this channel (getting ~16-20s/it which is about as fast as I can do it using fiji)
+                if save_max:
+                    with tqdm(total=len(timepoint_names)) as max_pbar:
+                        max_pbar.set_description('Saving max projections')
+                        for tp, tp_name in enumerate(timepoint_names):
+                            if len(illum_names) > 1:
+                                tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.maximum(np.max(channel_array_left[tp,:,:,:], axis=0), np.max(channel_array_right[tp,:,:,:], axis=0)))
+                            else:
+                                tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.max(channel_array[tp,:,:,:], axis=0))
+                            max_pbar.update(1)
 
         print(f'done saving regions')
 
