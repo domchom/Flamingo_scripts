@@ -26,8 +26,33 @@ class Kkpo:
                                                                                                               'MP' in file,
                                                                                                               'max' in file])]
         self.region_names = np.unique([file.split('_')[3] for file in self.files])
-        self.metadata = [line.rstrip() for line in open(self.file_path / 'FlamingoMetaData.txt', "r")]
-        self.objmag = int([line for line in self.metadata if 'Name = ' in line][0][-3:-1])
+        self.temporal = True # default
+        try:
+            with open(self.file_path / 'FlamingoMetaData.txt', "r") as f:
+                self.metadata = [line.rstrip() for line in f]
+            self.objmag = int([line for line in self.metadata if 'Name = ' in line][0][-3:-1])
+        except FileNotFoundError:
+            print('No metadata found. Continuing...')
+            self.metadata = None
+            self.objmag = None
+
+    def get_datetime(self, settings_file: np.ndarray):
+        '''
+        Extracts the date and time from a settings file.
+        Accepts: settings file for a given timepoint as an ndarray
+        Returns: datetime object
+        '''
+        timestamp_line = [line for line in settings_file if 'Date time stamp' in line][0]
+        timestamp_val = timestamp_line.split('=')[-1]
+        timestamp_date = timestamp_val.split('_')[0]
+        timestamp_time = timestamp_val.split('_')[1]
+        start_year = int(timestamp_date[0:5])
+        start_month = int(timestamp_date[5:7])
+        start_day = int(timestamp_date[7:9])
+        start_hour = int(timestamp_time[0:2])
+        start_minute = int(timestamp_time[2:4])
+        start_second = int(timestamp_time[4:6])
+        return datetime(start_year, start_month, start_day, start_hour, start_minute, start_second)
 
     def get_region_info(self, region_name: str):
         '''
@@ -48,46 +73,39 @@ class Kkpo:
         illum_names =     np.unique([file.split('_')[7] for file in self.files])
         plane_names =     np.unique([file.split('_')[9] for file in self.files])
         num_timepoints =  len(timepoint_names)
+        print(f'num time points = {num_timepoints}')
 
-        # pick out the first and lasat settings files
+        # pick out the first and last settings files
         setting_files = [file for file in os.listdir(self.file_path) if "Settings.txt" in file and region_name in file and not file.startswith('.')]
         first_timepoint_name = [file for file in setting_files if all(match in file for match in [timepoint_names[0], channel_names[0], illum_names[0]])]
         last_timepoint_name = [file for file in setting_files if all(match in file for match in [timepoint_names[-1], channel_names[0], illum_names[0]])]
 
-        # quality control
+        # read the settings file, get the start and end times
+        with open(self.file_path / first_timepoint_name[0], "r") as f:
+            first_timepoint_file = [l.rstrip() for l in f]
+        start_datetime = self.get_datetime(first_timepoint_file)
+
+        if num_timepoints == 1 or len(first_timepoint_name) == 1 and len(last_timepoint_name) == 0:
+            self.temporal = False
+            print('No setting file found for last timepoint, continuing without interval calculation.')
+            timepoint_names = [first_timepoint_name[0].split('_')[1]]
+            return 0, timepoint_names, channel_names, illum_names, plane_names
+
         if len(first_timepoint_name) != 1 or len(last_timepoint_name) != 1:
             print('*****'*9)
-            print(f'EEROR:Problem with the settings file!\n{len(first_timepoint_name)} first and {len(last_timepoint_name)} last timepoint names found.\n',
-                  f'Expected 1 first and 1 last timepoint name. Exiting...')
+            print(f'{len(first_timepoint_name)} setting files found for first timepoint')
+            print(f'{len(last_timepoint_name)} setting files found for last timepoint')
+            print('expecting 1 setting file for each')
             print('*****'*9)
             sys.exit()
-        
-        def get_datetime(settings_file: np.ndarray):
-            '''
-            Extracts the date and time from a settings file.
-            Accepts: settings file for a given timepoint as an ndarray
-            Returns: datetime object
-            '''
-            timestamp_line = [line for line in settings_file if 'Date time stamp' in line][0]
-            timestamp_val = timestamp_line.split('=')[-1]
-            timestamp_date = timestamp_val.split('_')[0]
-            timestamp_time = timestamp_val.split('_')[1]
-            start_year = int(timestamp_date[0:5])
-            start_month = int(timestamp_date[5:7])
-            start_day = int(timestamp_date[7:9])
-            start_hour = int(timestamp_time[0:2])
-            start_minute = int(timestamp_time[2:4])
-            start_second = int(timestamp_time[4:6])
-            return datetime(start_year, start_month, start_day, start_hour, start_minute, start_second)
 
-        # read the settings file, get the start and end times
-        first_timepoint_file = np.loadtxt(self.file_path / first_timepoint_name[0], dtype='str', delimiter = '/n')
-        start_datetime = get_datetime(first_timepoint_file)
-        last_timepoint_file = np.loadtxt(self.file_path / last_timepoint_name[0], dtype='str', delimiter = '/n')
-        end_datetime = get_datetime(last_timepoint_file)
+        with open(self.file_path / last_timepoint_name[0], "r") as f:
+            last_timepoint_file = [l.rstrip() for l in f]
+        end_datetime = self.get_datetime(last_timepoint_file)
         total_seconds = (end_datetime - start_datetime).total_seconds()
         interval = total_seconds / (num_timepoints - 1)
         return interval, timepoint_names, channel_names, illum_names, plane_names
+
     
     def save_regions(self, save_vol = False, save_max = True, step = 8, overwrite = False):
         ''' 
@@ -126,8 +144,21 @@ class Kkpo:
     
             for ch_num, ch_name in enumerate(channel_names):
                 print(f'Saving channel {ch_num+1}/{len(channel_names)}')
-                if len(illum_names) > 1:
-                    print('Two-sided illumination detected')
+                if not self.temporal and len(illum_names) == 1:
+                    print('single time point and one-sided illumination detected')
+                    channel_array = dask_read(self.file_path / f'S000_t000000_V000_{region_name}_X000_Y000_{ch_name}_I0_D0_{plane_names[region_num]}')
+                if not self.temporal and len(illum_names) == 2:
+                    print('single time point and two-sided illumination detected')
+                    channel_array_left = dask_read(self.file_path / f'S000_t000000_V000_{region_name}_X000_Y000_{ch_name}_I0_D0_{plane_names[region_num]}')
+                    channel_array_right = dask_read(self.file_path / f'S000_t000000_V000_{region_name}_X000_Y000_{ch_name}_I1_D0_{plane_names[region_num]}')
+                    
+                if self.temporal and len(illum_names) == 1:
+                    print('Multiple time points with one-sided illumination detected')
+                    channel_array = dask_read(self.file_path /  f'*{region_name}*{ch_name}*.tif')
+                    channel_array.compute_chunk_sizes()
+                
+                if self.temporal and len(illum_names) == 2:
+                    print('Multiple time points with two-sided illumination detected')
                     channel_array_left = dask_read(self.file_path / f'*{region_name}*{ch_name}_I0*.tif')
                     channel_array_right = dask_read(self.file_path / f'*{region_name}*{ch_name}_I1*.tif')
 
@@ -140,16 +171,29 @@ class Kkpo:
                         channel_array_left = channel_array_left[:numtp2]
                     assert channel_array_left.shape == channel_array_right.shape, 'something is wrong... I0 and I1 arrays are not the same shape'
 
-
-                else:
-                    channel_array = dask_read(self.file_path /  f'*{region_name}*{ch_name}*.tif')
-
                 # save the downsampled channel volume, if requested
                 if save_vol:
 
                     chan_path = region_save_path / f'{region_name}_{ch_name}_volume.zarr'
 
-                    if len(illum_names) > 1:
+                    if not self.temporal and len(illum_names) == 1:
+                        print('Saving volume, please be patient...')
+                        da.to_zarr(channel_array[:,::step,::step], chan_path, overwrite=True)
+                    
+                    if not self.temporal and len(illum_names) == 2:
+                        print('Saving volume, please be patient...')
+                        fused = da.maximum(channel_array_left, channel_array_right)
+                        da.to_zarr(fused[:,::step,::step], chan_path, overwrite=True)
+
+                    if self.temporal and len(illum_names) == 1:
+                        with yaspin() as sp:
+                            sp.text = f'Converting full volume for {ch_name} to zarr, please be patient...'
+                            start = time.time()
+                            da.to_zarr(channel_array[:,:,::step,::step], chan_path, overwrite=True)
+                            end = time.time()
+                            print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
+
+                    if self.temporal and len(illum_names) == 2:
                         with yaspin() as sp:
                             sp.text = f'Fusing two-sided illumination and converting full volume for {ch_name} to zarr, please be patient...'
                             start = time.time()
@@ -158,24 +202,33 @@ class Kkpo:
                             end = time.time()
                             print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
 
-                    else:
-                        with yaspin() as sp:
-                            sp.text = f'Converting full volume for {ch_name} to zarr, please be patient...'
-                            start = time.time()
-                            da.to_zarr(channel_array[:,:,::step,::step], chan_path, overwrite=True)
-                            end = time.time()
-                            print(f'Saved channel {ch_name} in {round(end - start, 3)} seconds')
+
 
                 # save the max projections for this channel (getting ~16-20s/it which is about as fast as I can do it using fiji)
                 if save_max:
                     with tqdm(total=len(timepoint_names)) as max_pbar:
                         max_pbar.set_description('Saving max projections')
-                        for tp, tp_name in enumerate(timepoint_names):
+                        if not self.temporal:
                             if len(illum_names) > 1:
-                                tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.maximum(np.max(channel_array_left[tp,:,:,:], axis=0), np.max(channel_array_right[tp,:,:,:], axis=0)))
-                            else:
-                                tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.max(channel_array[tp,:,:,:], axis=0))
+                                tiff_write(region_save_path / f'{region_name}_{ch_name}_Max.tiff', np.maximum(np.max(channel_array_left, axis=0), np.max(channel_array_right, axis=0)))
+                            if len(illum_names) == 1:
+                                tiff_write(region_save_path / f'{region_name}_{ch_name}_Max.tiff', np.max(channel_array, axis=0))
                             max_pbar.update(1)
+                        else:
+                            for tp, tp_name in enumerate(timepoint_names):
+                                if len(illum_names) > 1:
+                                    tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', np.maximum(np.max(channel_array_left[tp], axis=0), np.max(channel_array_right[tp], axis=0)))
+                                else:
+                                    print(channel_array.shape, tp)
+                                    m = da.max(channel_array[tp], axis=0)
+                                    print(type(m))
+                                    print(f'shape of max projection is {m.shape}')
+                                    print(f'chunk size of max projection is {m.chunksize}')
+                                    #m = np.asarray(m)
+                                    #print(type(m))
+                                    #print(f'shape of max projection is {m.shape}')
+                                    tiff_write(region_save_path / f'{region_name}_{ch_name}_{tp_name}_Max.tiff', m)
+                                max_pbar.update(1)
 
         print(f'done saving regions')
 
@@ -193,7 +246,7 @@ class Kkpo:
 
         channels = [da.from_zarr(region_save_path / f'{region}_{ch}_volume.zarr') for ch in channel_names]
 
-        with napari.gui_qt():
-            viewer = napari.Viewer(title="Interactive Kkpo Viewer")
-            for chan_num, channel in enumerate(channels):
-                viewer.add_image(channel, name=f'Region {region}, Ch {chan_num+1}', contrast_limits=[0, 20000], blending='additive') # T, Z, X, Y)
+        viewer = napari.Viewer(title="Interactive Kkpo Viewer")
+        for chan_num, channel in enumerate(channels):
+            viewer.add_image(channel, name=f'Region {region}, Ch {chan_num+1}', contrast_limits=[0, 20000], blending='additive') # T, Z, X, Y)
+        napari.run()
